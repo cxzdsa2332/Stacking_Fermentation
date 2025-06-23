@@ -1,0 +1,213 @@
+#Fig2
+rm(list=ls())
+library(parallel)
+library(glmnet)
+library(cowplot)
+library(ggplot2)
+library(viridis)
+library(reshape2)
+library(gridExtra)
+library(patchwork)
+#import dataset
+dfs = list(read.csv(file = "16s_otu.csv",row.names = 1),
+           read.csv(file = "ITS_otu.csv",row.names = 1))
+
+
+
+process_data <- function(df,info = 8,sort = F){
+  d = ncol(df)
+  
+  df_info = df[,(d-info):d]
+  
+  df_annotation = df_info$genus
+  
+  
+  df_annotation[which(df_annotation=='')] = df_info$species[which(df_annotation=='')]
+  df_annotation[which(df_annotation=='Unassigned')] = df_info$family[which(df_annotation=='Unassigned')]
+  df_annotation[which(df_annotation=='Unassigned')] = df_info$order[which(df_annotation=='Unassigned')]
+  df_annotation[which(df_annotation=='Unassigned')] = df_info$class[which(df_annotation=='Unassigned')]
+  
+  
+  df_raw = aggregate(df[,1:(d-info-1)], by=list(df_annotation), FUN = 'sum')
+  df_raw[which(df_raw$Group.1=="Unassigned"),-1] = df_raw[which(df_raw$Group.1=="Unassigned"),-1] +
+    df_raw[1,-1]
+  rownames(df_raw) = df_raw[,1]
+  df_raw = df_raw[-1,-1]
+  
+  if (sort) {
+    df_otu = df_raw[,order(colSums(df_raw))]
+  } else{
+    df_otu = df_raw
+  }
+  
+  if (any(rownames(df_otu)=='')) {
+    df_otu[which(rownames(df_otu)=='Unassigned'),] = df_otu[which(rownames(df_otu)=='Unassigned'),] +
+      df_otu[which(rownames(df_otu)==''),]
+    df_otu = df_otu[-which(rownames(df_otu)==''),]
+  }
+  return(df_otu)
+}
+
+df_otus = lapply(dfs,process_data,info = 8,sort = F)
+n1=nrow(df_otus[[1]])
+n2=nrow(df_otus[[2]])
+
+
+#merge data
+common_sample = intersect(colnames(df_otus[[1]]),colnames(df_otus[[2]]))
+df_otu = Reduce(rbind,lapply(df_otus, function(x) x[common_sample]))
+
+#split batch and filter excess 0
+split_filter <- function(df_otu, remove_nopheno = TRUE, filter = TRUE, alpha = 0.01){
+  if (remove_nopheno) {
+    pheno = read.csv(file = "data/pheno.csv",row.names = 1)
+    missing_pheno = which(sapply(pheno[,2],is.na))
+    missing_sample = pheno$sample[missing_pheno]
+    #remove missing pheno data
+    df_otu = df_otu[,-match(missing_sample,colnames(df_otu))]
+  }
+  #add superfamily
+  df_otu$superfamily = c(rep("Bacteria",n1),rep("Fungi",n2))
+  
+  
+  if (filter) {
+    d = ncol(df_otu)
+    df.index.keep <- which(rowSums(df_otu[,-d])*100/(sum(rowSums(df_otu[,-d]))) > alpha)
+    df_otu <- df_otu[df.index.keep, ]
+  }
+  
+  
+  tmp = sapply(colnames(df_otu),strsplit,'')
+  tmp2 = sapply(tmp,function(x) paste0(x[1:2],collapse = ''))
+  
+  batch = unique(tmp2)
+  batch = batch[grep("D",batch)]
+  
+  
+  all_no = sapply(batch, function(x)which(tmp2==x))
+  
+  
+  df_otu2 = lapply(all_no, function(x) cbind(df_otu[,x],df_otu$superfamily))
+  for (i in length(df_otu2)) {
+    colnames(df_otu2[[i]])[ncol(df_otu2[[i]])] = 'superfamily'
+  }
+  
+  df_otu2
+}
+
+df_batches = split_filter(df_otu)
+
+
+
+trans_sort <- function(df, trans = log10){
+  d = ncol(df)
+  info = df[,d]
+  df = df[,-d]
+  
+  df = df[,order(colSums(df))]
+  
+  times = trans(colSums(df)+1)
+  
+  
+  df2 = trans(df+1)
+  colnames(df2) = as.numeric(times)
+  df3 = cbind(df2, info)
+  colnames(df3)[ncol(df3)] = 'superfamily'
+  
+  return(list(df_sort = df,
+              times = times, 
+              df_info = df3))
+}
+
+df_batches2 = lapply(df_batches, trans_sort)
+df_batches2 = df_batches2[c(2,4,3,1)]
+
+df_B = lapply(1:4,function(xi)
+  df_batches2[[xi]]$df_sort[df_batches2[[xi]]$df_info$superfamily == "Bacteria",])
+
+df_F = lapply(1:4,function(xi)
+  df_batches2[[xi]]$df_sort[df_batches2[[xi]]$df_info$superfamily == "Fungi",])
+
+
+df = df_F
+ss=1
+
+
+plot_heat <- function(df,ss){
+  
+  names = lapply(1:4,function(xi) rownames(df[[xi]])[order(rowSums(df[[xi]]),decreasing = T)])
+  
+  #select top 20 and make the intersection of them
+  common = Reduce(intersect,lapply(names, function(xi) xi[1:20]))
+  df_common = lapply(1:4, function(xi) df[[xi]][common,])
+  
+  df_common = lapply(df_common, function(xi) log10(xi+1))
+  
+  limits = range(0,max(sapply(df_common, max)))
+  
+  df_plot = df_common[[ss]]
+  
+  colnames(df_plot) = 1:ncol(df_plot)
+  df_plot$Bacteria <- rownames(df_plot)
+  
+
+  original_names <- rownames(df_plot)
+  bacteria_labels <- paste0("F", seq_along(original_names))
+  rownames(df_plot) <- bacteria_labels
+  df_plot$Bacteria <- bacteria_labels
+  
+  #custom_colors <- c("#FFFFBF",'#DA6C6C', "#A50026")
+  # Melt the data
+  df_long <- melt(df_plot, id.vars = "Bacteria", variable.name = "SampleSite", value.name = "Abundance")
+  
+  # Set factor levels for consistent ordering
+  df_long$Bacteria <- factor(df_long$Bacteria, levels = bacteria_labels)
+  df_long$SampleSite <- factor(df_long$SampleSite, levels = rev(unique(df_long$SampleSite)))
+  
+  heatmap_plot <- ggplot(df_long, aes(x = SampleSite, y = Bacteria, fill = Abundance)) +
+    geom_tile(color = "white") +
+    #scale_fill_viridis(name = "Abundance", option = "D", direction = -1,limits = limits) + 
+    scale_fill_viridis(name = "Abundance", option = "C", direction = -1,limits = limits) + 
+    #scale_fill_gradientn(colors = custom_colors, 
+    #                     limits = limits,
+    #                     na.value = "grey90") +
+    theme_minimal(base_size = 12) +
+    theme(
+      #axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid = element_blank()
+    ) + coord_flip() +
+    labs(title = "Bacterial Abundance Heatmap", x = "Sample Site", y = "Bacteria")
+  
+  # Create label mapping table as a data frame
+  label_map <- data.frame(
+    Label = bacteria_labels,
+    OriginalName = original_names
+  )
+  
+  label_map$y <- seq_len(nrow(label_map))  # e.g., 1, 2, 3
+  label_map$FullLabel <- paste0(label_map$Label, ": ", label_map$OriginalName)
+  
+  # Plot with only text
+  ggplot(label_map, aes(x = 1, y = y, label = rev(FullLabel))) +
+    geom_text(size = 5, hjust = 0) +  # Align left
+    theme_void() +  # Remove axes
+    xlim(1, 5) +  # Give some horizontal space
+    #labs(title = "Bacteria Labels") +
+    labs(title = "Fungi Labels") +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold")
+    )
+  # Plot the mapping table using tableGrob
+  #table_plot <- tableGrob(label_map, rows = NULL)
+  
+  # Combine heatmap and table below
+  #grid.arrange(heatmap_plot, table_plot, ncol = 1, heights = c(4, 1))
+  heatmap_plot
+}
+p1 = plot_heat(df_B, ss = 1)
+p2 = plot_heat(df_B, ss = 2)
+p3 = plot_heat(df_B, ss = 3)
+p4 = plot_heat(df_B, ss = 4)
+
+pp = p1/p2/p3/p4
+ggsave(pp,filename = "FigS2_Bacteria_heatmap.pdf", width = 8, height = 25)
