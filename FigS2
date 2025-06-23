@@ -1,0 +1,777 @@
+#FigS1
+rm(list=ls())
+library(parallel)
+library(glmnet)
+library(cowplot)
+library(ggplot2)
+library(viridis)
+library(reshape2)
+library(gridExtra)
+library(patchwork)
+#import dataset
+dfs = list(read.csv(file = "16s_otu.csv",row.names = 1),
+           read.csv(file = "ITS_otu.csv",row.names = 1))
+
+
+
+process_data <- function(df,info = 8,sort = F){
+  d = ncol(df)
+  
+  df_info = df[,(d-info):d]
+  
+  df_annotation = df_info$genus
+  
+  
+  df_annotation[which(df_annotation=='')] = df_info$species[which(df_annotation=='')]
+  df_annotation[which(df_annotation=='Unassigned')] = df_info$family[which(df_annotation=='Unassigned')]
+  df_annotation[which(df_annotation=='Unassigned')] = df_info$order[which(df_annotation=='Unassigned')]
+  df_annotation[which(df_annotation=='Unassigned')] = df_info$class[which(df_annotation=='Unassigned')]
+  
+  
+  df_raw = aggregate(df[,1:(d-info-1)], by=list(df_annotation), FUN = 'sum')
+  df_raw[which(df_raw$Group.1=="Unassigned"),-1] = df_raw[which(df_raw$Group.1=="Unassigned"),-1] +
+    df_raw[1,-1]
+  rownames(df_raw) = df_raw[,1]
+  df_raw = df_raw[-1,-1]
+  
+  if (sort) {
+    df_otu = df_raw[,order(colSums(df_raw))]
+  } else{
+    df_otu = df_raw
+  }
+  
+  if (any(rownames(df_otu)=='')) {
+    df_otu[which(rownames(df_otu)=='Unassigned'),] = df_otu[which(rownames(df_otu)=='Unassigned'),] +
+      df_otu[which(rownames(df_otu)==''),]
+    df_otu = df_otu[-which(rownames(df_otu)==''),]
+  }
+  return(df_otu)
+}
+
+df_otus = lapply(dfs,process_data,info = 8,sort = F)
+n1=nrow(df_otus[[1]])
+n2=nrow(df_otus[[2]])
+
+
+#merge data
+common_sample = intersect(colnames(df_otus[[1]]),colnames(df_otus[[2]]))
+df_otu = Reduce(rbind,lapply(df_otus, function(x) x[common_sample]))
+
+#split batch and filter excess 0
+split_filter <- function(df_otu, remove_nopheno = TRUE, filter = TRUE, alpha = 0.01){
+  if (remove_nopheno) {
+    pheno = read.csv(file = "data/pheno.csv",row.names = 1)
+    missing_pheno = which(sapply(pheno[,2],is.na))
+    missing_sample = pheno$sample[missing_pheno]
+    #remove missing pheno data
+    df_otu = df_otu[,-match(missing_sample,colnames(df_otu))]
+  }
+  #add superfamily
+  df_otu$superfamily = c(rep("Bacteria",n1),rep("Fungi",n2))
+  
+  
+  if (filter) {
+    d = ncol(df_otu)
+    df.index.keep <- which(rowSums(df_otu[,-d])*100/(sum(rowSums(df_otu[,-d]))) > alpha)
+    df_otu <- df_otu[df.index.keep, ]
+  }
+  
+  
+  tmp = sapply(colnames(df_otu),strsplit,'')
+  tmp2 = sapply(tmp,function(x) paste0(x[1:2],collapse = ''))
+  
+  batch = unique(tmp2)
+  batch = batch[grep("D",batch)]
+  
+  
+  all_no = sapply(batch, function(x)which(tmp2==x))
+  
+  
+  df_otu2 = lapply(all_no, function(x) cbind(df_otu[,x],df_otu$superfamily))
+  for (i in length(df_otu2)) {
+    colnames(df_otu2[[i]])[ncol(df_otu2[[i]])] = 'superfamily'
+  }
+  
+  df_otu2
+}
+
+
+trans_sort <- function(df, trans = log10){
+  d = ncol(df)
+  info = df[,d]
+  df = df[,-d]
+  
+  df = df[,order(colSums(df))]
+  
+  times = trans(colSums(df)+1)
+  
+  
+  df2 = trans(df+1)
+  colnames(df2) = as.numeric(times)
+  df3 = cbind(df2, info)
+  colnames(df3)[ncol(df3)] = 'superfamily'
+  
+  return(list(df_sort = df,
+              times = times, 
+              df_info = df3))
+}
+
+
+df_batches = split_filter(df_otu)
+df_batches2 = lapply(df_batches, trans_sort)
+df_batches2 = df_batches2[c(2,4,3,1)]
+
+
+power_equation <- function(x, power_par){ 
+  if (is.null(nrow(power_par))==F) {
+    t(apply(power_par, 1, function(par) par[1]*x^par[2] ) )
+  } else{
+    power_par[1]*x^power_par[2]
+  }
+}
+
+
+d_power_equation <- function(x, power_par){ 
+  #Derivative of Power equation
+  if (is.null(nrow(power_par))==F) {
+    t(apply(power_par, 1, function(par) par[1]*par[2]*x^(par[2]-1) ) )
+  } else{
+    power_par[1]*power_par[2]*x^(power_par[2]-1)
+  }
+}
+
+power_fit <- function(x,y){
+  x = as.numeric(x)
+  y = as.numeric(y)
+  
+  obs_position = which(y!=0)
+  x_obs = x[obs_position]
+  y_obs = y[obs_position]
+  
+  init_fit = lm(log(y_obs)~log(x_obs))
+  a = exp(coef(init_fit))[1]
+  b = coef(init_fit)[2]  
+  par0 = c(a,b)
+  
+  fit = nls(y~a*x^b,start = list(a = par0[1], b = par0[2]),
+            control = nls.control(maxiter = 1e6,minFactor = 1e-350))
+  
+  return(coef(fit))
+}
+
+
+#####fitting
+
+fit_AER <- function(x,y){
+  x = as.numeric(x)
+  y = as.numeric(y)
+  data = data.frame(x = x,y = y)
+  
+  y_obs = length(which(y!=0))
+  
+  if (y_obs < 2) {
+    par0 = c(0,0)
+  } else{
+    model = AER::tobit(
+      y ~ x,
+      data = data,
+      left = 0,
+      right = Inf
+    )
+    a = exp(coef(model))[1]
+    b = coef(model)[2]
+    par0 = c(a,b)
+  }
+  return(par0)
+}
+
+
+fit_complete <- function(x,y,par){
+  x = as.numeric(x)
+  y = as.numeric(y)
+  nlp = par[1]*x^par[2]
+  sigma = par[3]
+  
+  ll = sum(dnorm(y-nlp, sd = sigma, log = T) )
+  -ll
+}
+
+
+fit_all <- function(x,y,par0, sd_max){
+  x = as.numeric(x)
+  y = as.numeric(y)
+  data = data.frame(x = x,y = y)
+  
+  y_obs = length(which(y!=0))
+  
+  tobit_power_equation <- function(par, x, y, ul = -Inf, ll = Inf) {
+    x = as.numeric(x)
+    y = as.numeric(y)
+    # this function only takes a lower OR upper limit
+    # predictor
+    nlp = par[1]*x^par[2]
+    sigma = par[3]
+    
+    # create indicator depending on limit
+    if (!is.infinite(ll)) {
+      limit = ll
+      indicator = y > ll
+    } else {
+      limit = ul
+      indicator = y < ul
+    }
+    
+    
+    # log likelihood
+    ll = sum(indicator * dnorm(y-nlp, sd = sigma, log = T) ) + 
+      sum((1-indicator) * pnorm(nlp, sd = sigma, log.p = T,lower = is.infinite(ll)))
+    
+    -ll
+  }
+  
+  
+  
+  if (y_obs < 2) {
+    par1 = c(0,0)
+  } else{
+    if (y_obs == length(y)) {
+      lmFit <- lm( log(y)  ~ log(x) )
+      coefs <- coef(lmFit)
+      a <- exp(coefs[1])
+      b <- coefs[2]
+      
+      
+      fit = try(nls(y~a*x^b,start = list(a = a, b = b),
+                    control = nls.control(maxiter = 1e5,minFactor = 1e-300)))
+      
+      if ('try-error' %in% class(fit)) {
+        iter = 0
+        while ('try-error' %in% class(fit) & iter < 1000  ) {
+          fit = try(nls(y~a*x^b,start = list(a = a, b = b+runif(1,-0.1,0.1)),
+                        control = nls.control(maxiter = 1e4,minFactor = 1e-300)))
+          iter = iter+1
+        }
+        
+      }
+      
+      
+      par1 = as.numeric(coef(fit))
+      
+    } else {
+      #fit with tobit model
+      
+      fit = try(optim(
+        par = c(par0,sd(y)),
+        tobit_power_equation,
+        y  = y,
+        x  = x,
+        ll = 0,
+        method  = 'L-BFGS',
+        lower = c(0,-Inf,0),
+        upper = c(Inf,Inf,sd_max),
+        control = list(trace = T,maxit = 1000)))
+      
+      if ('try-error' %in% class(fit)) {
+        par0 = c(scale(par0,center = T,scale = T),sd(y))
+        fit = optim(par = c(par0,sd(y)),
+                    tobit_power_equation,
+                    y  = y,
+                    x  = x,
+                    ll = 0,
+                    method  = 'L-BFGS',
+                    lower = c(0,-Inf,0),
+                    upper = c(Inf,Inf,sd_max),
+                    control = list(trace = T,maxit = 1000))
+      }  
+      
+      par1 = fit$par[1:2]
+    }
+    
+  }
+  return(par1)
+}
+
+power_equation <- function(x, power_par){ 
+  if (is.null(nrow(power_par))==F) {
+    t(apply(power_par, 1, function(par) par[1]*x^par[2] ) )
+  } else{
+    power_par[1]*x^power_par[2]
+  }
+}
+
+
+
+initial_fit <- function(x,y){
+  x = as.numeric(x)
+  y = as.numeric(y)
+  data = data.frame(x = x,y = y)
+  
+  n_obs = length(which(y!=0))
+  
+  if (n_obs < 2 | length(unique(y[y!=0]))==1 ) {
+    par0 = c(0,0) # can not fit
+  } 
+  else {
+    if ( n_obs >= 2 & n_obs <=5 ) {
+      x_matrix = cbind(log(x[y!=0]),0)
+      model = glmnet(x_matrix,log(y[y!=0]), alpha = 0)
+      a = exp(coef(model))[1]
+      b = coef(model)[2]
+    }
+    else{
+      model = lm(log(y[y!=0])~log(x[y!=0]))
+      a = exp(coef(model))[1]
+      b = coef(model)[2]
+      if (is.infinite(a)|a==0) {
+        model = glmnet(x_matrix,log(y[y!=0]), alpha = 0)
+        a = exp(coef(model))[1]
+        b = coef(model)[2]
+      }
+    }
+    par0 = c(a,b)
+  }
+  
+  return(par0)
+}
+
+
+fit_next <- function(x,y,par0,trace = F){ 
+  eps = .Machine$double.eps
+  x = as.numeric(x)
+  y = as.numeric(y)
+  data = data.frame(x = x,y = y)
+  
+  n_obs = length(which(y!=0))
+  
+  JointLogLik <- function(par,x,y){
+    # divided dataset
+    y0 = y[which(y==0)]
+    y1 = y[which(y!=0)]
+    
+    x0 = x[which(y==0)]
+    x1 = x[which(y!=0)]
+    
+    
+    beta1 = par[1:2]
+    beta2 = par[3:4]
+    sigma = par[5]
+    
+    LL <- function(s){
+      #https://web.archive.org/web/20140221080116/http://lingpipe-blog.com/2012/02/16/howprevent-overflow-underflow-logistic-regression
+      # compute log(1 + exp(s)) to avoid overflow
+      # notice in power equation s should always be positive values
+      L = s + log(exp(-s) + 1)
+      return(L)
+    }
+    
+    L1 = beta1[1]*x0^beta1[2]
+    L2 = beta1[1]*x1^beta1[2]
+    #p0 = exp(L1)/(1+exp(L1))
+    #p1 = 1/(1+exp(L2))
+    
+    #LogLik1 = sum(log(p0))
+    LogLik1 = sum(L1 - LL(L1))
+    LogLik2 = sum(-LL(L2)) + 
+      sum(dnorm(y1-beta2[1]*x1^beta2[2], mean = 0, sd = sigma, log = T))
+    #print(beta2[1]*x1^beta2[2])
+    
+    LogLik = LogLik1 + LogLik2
+    return(-LogLik)
+  }
+  
+  fit_less <- function(par,x,y){
+    y0 = y[which(y==0)]
+    y1 = y[which(y!=0)]
+    
+    x0 = x[which(y==0)]
+    x1 = x[which(y!=0)]
+    
+    y2 = par[1]*x1^par[2]
+    
+    ssr = crossprod(y2-y1)+abs(par[1])+abs(par[2])
+    ssr
+  }
+  
+  if ( n_obs < 2 | length(unique(y[y!=0]))==1 ) {
+    par1 = c(0,0)
+    contain_missing = T
+    fit_method = "NULL"
+    fit_quality = 0
+  } 
+  else{
+    if ( n_obs >= 2 & n_obs<30 ){
+      if ( n_obs == length(y) ) {
+        #complete observaton case (n<30)
+        fit = try(nls(y~a*x^b,start = list(a = par0[1], b = par0[2]),
+                      control = nls.control(maxiter = 1e5,minFactor = 1e-300)))
+        
+        while ('try-error' %in% class(fit)) {
+          fit = try(nls(y~a*x^b,start = list(a = runif(1), b = runif(1)),
+                        control = nls.control(maxiter = 1e5,minFactor = 1e-300)))
+        }
+        
+        contain_missing = F
+        fit_method = "nls"
+        fit_quality = 3
+        par1 = coef(fit)
+      }
+      else if ( n_obs<=5 ) {
+        #fit with least square with penalty
+        fit = optim(par0,fit_less,x=x,y=y,  
+                    method  = 'L-BFGS',
+                    #lower = c(1e-300,-Inf),
+                    #upper = c(1000,1000),
+                    control = list(maxit = 1e5, 
+                                   trace = trace))
+        contain_missing = T
+        fit_method = "least square with penalty"
+        fit_quality = 1
+        par1 = fit$par
+        
+      } 
+      else{
+        #fit with two step model
+        beta1 = c(0.5,0.5)
+        beta2 = par0
+        sigma = sd(y[y!=0])
+        par00 = c(beta1,beta2,sigma)
+        fit = try(optim(
+          par = par00,
+          JointLogLik,
+          x  = x,
+          y  = y,
+          method  = 'L-BFGS',
+          control = list(maxit = 1e5, 
+                         trace = trace,
+                         parscale = rep(1e-5,5))))
+        
+        
+        if ('try-error' %in% class(fit)) {
+          iter = 0
+          while ('try-error' %in% class(fit)) {
+            beta1 = c(0.1,0.1)
+            beta2 = par0
+            sigma = sd(y[y!=0])
+            par00 = c(beta1,beta2,sigma)
+            iter = iter+1
+            fit = try(optim(
+              par = par00,
+              JointLogLik,
+              x  = x,
+              y  = y,
+              method  = 'L-BFGS',
+              control = list(maxit = 1e5, 
+                             trace = trace,
+                             parscale = rep(1e-4*0.1^iter,5))))
+            
+          }
+        }  
+        
+        contain_missing = T
+        fit_method = "two step regression"
+        fit_quality = 2
+        par1 = fit$par[3:4]
+      }
+    }
+    else{
+      # observation >=30 case
+      if ( n_obs == length(y) ) {
+        #complete observaton case
+        fit = try(nls(y~a*x^b,start = list(a = par0[1], b = par0[2]),
+                      control = nls.control(maxiter = 1e5,minFactor = 1e-300)))
+        
+        while ('try-error' %in% class(fit)) {
+          fit = try(nls(y~a*x^b,start = list(a = runif(1), b = runif(1)),
+                        control = nls.control(maxiter = 1e5,minFactor = 1e-300)))
+        }
+        
+        contain_missing = F
+        fit_method = "nls"
+        fit_quality = 5
+        par1 = coef(fit)}
+      else{
+        #fit with two step model
+        beta1 = c(0.5,0.5)
+        beta2 = par0
+        sigma = sd(y[y!=0])
+        par00 = c(beta1,beta2,sigma)
+        fit = try(optim(
+          par = par00,
+          JointLogLik,
+          x  = x,
+          y  = y,
+          method  = 'L-BFGS',
+          control = list(maxit = 1e5, 
+                         trace = trace,
+                         parscale = rep(1e-5,5))))
+        
+        if ('try-error' %in% class(fit)) {
+          iter = 0
+          while ('try-error' %in% class(fit)) {
+            beta1 = c(0.1,0.1)
+            beta2 = par0
+            sigma = sd(y[y!=0])
+            par00 = c(beta1,beta2,sigma)
+            iter = iter+1
+            fit = try(optim(
+              par = par00,
+              JointLogLik,
+              x  = x,
+              y  = y,
+              method  = 'L-BFGS',
+              control = list(maxit = 1e5, 
+                             trace = trace,
+                             parscale = rep(1e-4*0.1^iter,5))))
+            
+          }
+        }  
+        
+        contain_missing = T
+        fit_method = "two step regression"
+        fit_quality = 4
+        par1 = fit$par[3:4]
+        
+        
+      }
+    }
+  }
+  
+  y_pred = power_equation(x, par1)
+  
+  return(c(par1,contain_missing,fit_method,fit_quality))
+}
+
+
+#data = df_batches[[i]][,-ncol(df_batches[[i]])]
+power_equation_fit <- function(data){
+  times_log = log10(colSums(data)+1)
+  data_log = log10(data+1)
+  
+  #data = data_log;times = times_log
+  fit_subset <- function(data,times){
+    n = nrow(data)
+    d = ncol(data)
+    par0 = t(apply(data,1,initial_fit,x=times))
+    
+    par1 = data.frame(t(sapply(1:n, function(xi) fit_next(x = times, 
+                                                          y = data[xi,],
+                                                          par0 = par0[xi,],
+                                                          trace = T))))
+    rownames(par1) = rownames(data)
+    colnames(par1) = c("a","b","")
+    return(par1)
+  }
+  
+  
+  par0 = t(apply(data_log,1,initial_fit,x=times_log))
+  
+  
+  
+  par1 = fit_subset(data_log,times_log)
+  
+  
+  new_times = seq(min(times_log),max(times_log),length = 30)
+  
+  colnames(data_log) = times_log
+  
+  
+  
+  #which(rownames(data_log)=="Thermoactinomyces_vulgaris")
+  par = par1[,1:2]
+  par$a = as.numeric(par$a)
+  par$b = as.numeric(par$b)
+  fit_data = power_equation(new_times,par)
+  rownames(fit_data) = rownames(data_log)
+  colnames(fit_data) = new_times
+  
+  
+  #complete_missing = which(apply(data, 1, function(xi) length(which(xi==0)))>=2)
+  
+  result = list(original_data = data,
+                trans_data = data_log,
+                fit_data = fit_data,
+                times_log = times_log,
+                new_times_log = new_times,
+                pars = par,
+                info = par1)
+  return(result)
+}
+
+power_equation_fit1 <- function(data,times){
+  times_log = times
+  data_log = log10(data+1)
+  
+  #data = data_log;times = times_log
+  fit_subset <- function(data,times){
+    n = nrow(data)
+    d = ncol(data)
+    par0 = t(apply(data,1,initial_fit,x=times))
+    
+    par1 = data.frame(t(sapply(1:n, function(xi) fit_next(x = times, 
+                                                          y = data[xi,],
+                                                          par0 = par0[xi,],
+                                                          trace = T))))
+    rownames(par1) = rownames(data)
+    colnames(par1) = c("a","b","")
+    return(par1)
+  }
+  
+  
+  par0 = t(apply(data_log,1,initial_fit,x=times_log))
+  
+  
+  
+  par1 = fit_subset(data_log,times_log)
+  
+  
+  new_times = seq(min(times_log),max(times_log),length = 30)
+  
+  colnames(data_log) = times_log
+  
+  
+  
+  #which(rownames(data_log)=="Thermoactinomyces_vulgaris")
+  par = par1[,1:2]
+  par$a = as.numeric(par$a)
+  par$b = as.numeric(par$b)
+  fit_data = power_equation(new_times,par)
+  rownames(fit_data) = rownames(data_log)
+  colnames(fit_data) = new_times
+  
+  
+  #complete_missing = which(apply(data, 1, function(xi) length(which(xi==0)))>=2)
+  
+  result = list(original_data = data,
+                trans_data = data_log,
+                fit_data = fit_data,
+                times_log = times_log,
+                new_times_log = new_times,
+                pars = par,
+                info = par1)
+  return(result)
+}
+
+df_B = lapply(1:4,function(xi)
+  df_batches2[[xi]]$df_sort[df_batches2[[xi]]$df_info$superfamily == "Bacteria",])
+
+df_F = lapply(1:4,function(xi)
+  df_batches2[[xi]]$df_sort[df_batches2[[xi]]$df_info$superfamily == "Fungi",])
+
+
+result_fit_B = lapply(1:4,function(xi) power_equation_fit(df_B[[xi]]))
+result_fit_F = lapply(1:4,function(xi) power_equation_fit(df_F[[xi]]))
+#save.image("resultfit.Rdata")
+load("resultfit.Rdata")
+
+
+df = result_fit_B[[3]]
+
+i=2
+plot_fit0 <- function(df,i){
+  
+  times = as.numeric(df$times_log)
+  newtimes = times
+  name = rownames(df$original_data)[i]
+  y = as.numeric(df$trans_data[i,])
+  
+  
+  df_plot <- data.frame(x = times,y = y)
+  fit = power_fit(x = times, y = y)
+  y_pred = as.numeric(power_equation(newtimes, fit))
+  
+  df_plot$y_pred = y_pred
+  df_plot$residuals = y - y_pred
+  
+  
+  p1 = ggplot(df_plot, aes(x = x)) +
+    geom_point(aes(y = y),color = "#CD5656", size = 1.5,shape = 1) +
+    geom_line(aes(y = y_pred),color = "#CD5656", size = 1.2) +
+    theme_minimal()+xlab("Habitat Index")+ylab("Abundance")
+  
+  
+  p2 = ggplot(df_plot, aes(x = x, y = residuals)) +
+    geom_point(color = "#4E71FF", size = 2) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red",size=1.1) +
+    labs(x = "Habitat Index", y = "Residuals") +
+    theme_minimal()
+  
+  p3 = ggplot(df_plot, aes(sample = residuals)) +
+    stat_qq(color = "#537D5D", size = 2) +
+    stat_qq_line(color = "red", linetype = "dashed",size=1.1) +
+    labs(title = name,
+         x = "Theoretical Quantiles",
+         y = "Standardized Residuals")+
+    theme_minimal()
+  
+  p3
+}
+
+
+
+
+
+
+#i=2
+plot_fit <- function(df,i){
+  
+  times = as.numeric(df$times_log)
+  newtimes = times
+  name = rownames(df$original_data)[i]
+  pars = df$pars[i,]
+  y_pred = as.numeric(power_equation(newtimes, pars))
+  
+  
+  df_plot <- data.frame(x = times,y = as.numeric(df$trans_data[i,]),
+                        y_pred =y_pred, 
+                        residuals= as.numeric(df$trans_data[i,]) -y_pred)
+  
+  
+  p1 = ggplot(df_plot, aes(x = x)) +
+    geom_point(aes(y = y),color = "#CD5656", size = 1.5,shape = 1) +
+    geom_line(aes(y = y_pred),color = "#CD5656", size = 1.2) +
+    theme_minimal()+xlab("Habitat Index")+ylab("Abundance")
+  
+
+  p2 = ggplot(df_plot, aes(x = x, y = residuals)) +
+    geom_point(color = "#4E71FF", size = 2) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red",size=1.1) +
+    labs(x = "Habitat Index", y = "Residuals") +
+    theme_minimal()
+  
+  p3 = ggplot(df_plot, aes(sample = residuals)) +
+    stat_qq(color = "#537D5D", size = 2) +
+    stat_qq_line(color = "red", linetype = "dashed",size=1.1) +
+    labs(title = name,
+         x = "Theoretical Quantiles",
+         y = "Standardized Residuals")+
+    theme_minimal()
+  
+  p3
+}
+
+plot_batch <- function(result_fit,i){
+  #p1 = plot_fit(result_fit[[1]],i)
+  #p2 = plot_fit(result_fit[[2]],i)
+  #p3 = plot_fit(result_fit[[3]],i)
+  #p4 = plot_fit(result_fit[[4]],i)
+  p = lapply(1:4,function(xi) plot_fit(result_fit[[xi]],i))
+  
+  pp = wrap_plots(p,ncol = 4)
+  pp
+}
+
+p1 = plot_batch(result_fit_B,6)
+p2 = plot_batch(result_fit_B,8)
+p3 = plot_batch(result_fit_B,12)
+p4 = plot_batch(result_fit_B,30)
+
+p5 = plot_batch(result_fit_F,7)
+p6 = plot_batch(result_fit_F,9)
+p7 = plot_batch(result_fit_F,17)
+p8 = plot_batch(result_fit_F,28)
+
+pp = p1/p2/p3/p4/p5/p6/p7/p8 + plot_layout(ncol = 1) +
+  plot_annotation(tag_levels = 'A') & 
+  theme(plot.tag = element_text(size = 20,face = "bold"))
+
+ggsave("FigS1.pdf",pp,width = 12,height = 20)
