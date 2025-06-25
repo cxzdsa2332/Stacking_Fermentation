@@ -1,0 +1,1198 @@
+
+load('result_fit_pheno.Rdata')
+batch = 'ED'
+
+
+names(result_fit_otu) = c("XD","ZD","YD","ED")
+names(result_fit_pheno) = c("XD","ZD","YD","ED")
+my_thred = c('XD'= 1e-5, 'ZD' = 0, "YD" = 1e-4, "ED" = 1e-4)
+my_thred = my_thred[batch]
+
+#pars = read.csv(file = 'pheno_combined/YD_means.csv',row.names = 1)
+df_info = read.csv(file = 'MT_info2.csv')
+#pars = read.csv(file = paste0("pheno_combined/",batch,'_means.csv'),row.names = 1)
+info = df_info[,c(1,grep(batch,colnames(df_info)))]
+
+
+get_par <- function(){
+  power_equation_fit1 <- function(data,times){
+    times_log = times
+    data_log = data
+    
+    #data = data_log;times = times_log
+    fit_subset <- function(data,times){
+      n = nrow(data)
+      d = ncol(data)
+      par0 = t(apply(data,1,initial_fit,x=times))
+      
+      par1 = data.frame(t(sapply(1:n, function(xi) fit_next(x = times, 
+                                                            y = data[xi,],
+                                                            par0 = par0[xi,],
+                                                            trace = T))))
+      rownames(par1) = rownames(data)
+      colnames(par1) = c("a","b","")
+      return(par1)
+    }
+    
+    
+    par0 = t(apply(data_log,1,initial_fit,x=times_log))
+    
+    
+    
+    par1 = fit_subset(data_log,times_log)
+    
+    
+    new_times = seq(min(times_log),max(times_log),length = 30)
+    
+    colnames(data_log) = times_log
+    
+    
+    
+    #which(rownames(data_log)=="Thermoactinomyces_vulgaris")
+    par = par1[,1:2]
+    par$a = as.numeric(par$a)
+    par$b = as.numeric(par$b)
+    fit_data = power_equation(new_times,par)
+    rownames(fit_data) = rownames(data_log)
+    colnames(fit_data) = new_times
+    
+    
+    #complete_missing = which(apply(data, 1, function(xi) length(which(xi==0)))>=2)
+    
+    result = list(original_data = data,
+                  trans_data = data_log,
+                  fit_data = fit_data,
+                  times_log = times_log,
+                  new_times_log = new_times,
+                  pars = par,
+                  info = par1)
+    return(result)
+  }
+  cluster = as.numeric(na.omit(as.numeric(names(table(info[,2])))))
+  
+  nos = lapply(cluster,function(xi)
+    match(info[info[,2]==xi,1],rownames(result_fit_otu[[batch]]$trans_data))
+  )
+  
+  x =  lapply(cluster,function(xi) 
+    result_fit_otu[[batch]]$original_data[nos[[xi]],])
+  x2 = result_fit_pheno[[batch]]$original_data
+  #x2 = result_fit_pheno[[batch]]$trans_data
+  x2 = data.frame(scale(x2)-min(scale(x2)))
+  rownames(x2) = paste0("P",1:7)
+  
+  #x_hat = lapply(cluster,function(xi) 
+  #  result_fit_otu[[batch]]$fit_data[nos[[xi]],])
+  #x_orig = lapply(x_hat,function(xi) 10^xi-1)
+  
+  
+  X_otu = t(sapply(cluster, function(xi) log10(colSums(x[[xi]]+1))))
+  rownames(X_otu) = paste0(strsplit(batch,split = '')[[1]][1],cluster)
+  
+  X = rbind(X_otu,as.matrix(x2))
+  
+  fit = power_equation_fit1(data = X,times = result_fit_pheno[[batch]]$times_log)
+  print(X)
+  fit
+}
+
+
+
+#pars2 = read.csv(file = paste0('pheno_combined/', batch, '_means.csv'),row.names = 1)
+
+fit = get_par()
+pars = fit$pars
+kk = length(as.numeric(na.omit(as.numeric(names(table(info[,2]))))))
+names(result_fit_otu) = c("XD","ZD","YD","ED")
+names(result_fit_pheno) = c("XD","ZD","YD","ED")
+pheno_orig = colnames(pheno)
+colnames(pheno) = paste0("P",1:ncol(pheno))
+
+
+x = result_fit_otu[[batch]]$times_log
+new_x = seq(min(x), max(x), length = 50)
+
+colnames(pars) = c("a","b")
+
+
+#pars = rbind(pars, result_fit_pheno[[batch]]$pars)
+#rownames(pars)[(kk+1):nrow(pars)] = colnames(pheno)
+select = (kk+1):nrow(pars)
+
+
+
+new_df = power_equation(new_x,pars)
+colnames(new_df) = new_x
+
+all_names= rownames(pars)
+
+d_df = d_power_equation(new_x,pars)
+
+
+
+power_equation <- function(x, power_par){ 
+  if (is.null(nrow(power_par))==F) {
+    t(apply(power_par, 1, function(par) par[1]*x^par[2] ) )
+  } else{
+    power_par[1]*x^power_par[2]
+  }
+}
+
+d_power_equation <- function(x, power_par){ 
+  #Derivative of Power equation
+  if (is.null(nrow(power_par))==F) {
+    t(apply(power_par, 1, function(par) par[1]*par[2]*x^(par[2]-1) ) )
+  } else{
+    power_par[1]*power_par[2]*x^(power_par[2]-1)
+  }
+}
+
+get_LOP_M <- function(x,n_order,name=NULL){
+  # Create basis matrix
+  require(orthopolynom)
+  
+  x = as.numeric(x)
+  LOP = legendre.polynomials(n = n_order)
+  leg <- as.matrix(as.data.frame(polynomial.values(polynomials=LOP,
+                                                   x=scaleX(x, u=-1, v=1))))
+  if ( is.null(name) ) {
+    colnames(leg) <- paste0("leg",0:(ncol(leg)-1))
+  } else {
+    colnames(leg) <- paste0(name,"__leg",0:(ncol(leg)-1))
+  }
+  
+  leg = leg[,-1] #remove zero order
+  leg
+}
+
+
+SparGrpLasso <- function(X,Y,i,s=1){
+  require(sparsegl)
+  #X should have colnames and rownames
+  #Y should have same rownames with X
+  #has no intercept
+  
+  ####group lasso
+  bs = length(unique(sapply(strsplit(colnames(X),"__"),'[[',2))) #batch size
+  bn = ncol(X)/bs #batch number
+  
+  ind_name = rownames(Y)[i] # name of independent variable
+  y = as.numeric(Y[i,])
+  
+  v_group = c(sapply(1:bn, function(x) rep(x,bs)))
+  
+  pf = rep(sqrt(bs),bn) #default is sqrt(bs)
+  pf[i] = 0 #default is sqrt(bs)
+  
+  gr_cv = cv.sparsegl(x=X, y=y, group=v_group, 
+                      family = c("gaussian"),
+                      intercept = F,
+                      pf_group = pf, 
+                      nfolds=10)
+  
+  coef_grp = coef(gr_cv, s = gr_cv$lambda.1se)
+  
+  if (sum(coef_grp)==0){
+    coef_grp = coef(gr_cv, s = gr_cv$lambda.1se*0.001)
+  }
+  
+  #coef_grp
+  
+  
+  #selected = rownames(coef_grp)[which(abs(as.numeric(coef_grp))>0)[-1]] #remove intercept
+  selected = rownames(coef_grp)[which(abs(as.numeric(coef_grp))>0)]
+  v_selected = unique(sapply(strsplit(selected,"__"),'[[',1))
+  v_dep = v_selected
+  if ( ind_name %in% v_selected) {
+    v_dep = v_selected[-match(ind_name,v_selected)]
+  }
+  v_pos = match(v_selected,rownames(Y))
+  
+  
+  if ( is.null(v_dep) ) {
+    warning('No dependent effect found')
+    regex_dep = NULL
+  } else{
+    regex_ind = paste0(ind_name,"__leg")
+    regex_dep = sapply(v_dep, paste0, "__leg")
+  }
+  
+  
+  ind_coef = lapply(regex_ind, function(x) coef_grp[grep(x,rownames(coef_grp))])
+  dep_coef = lapply(regex_dep, function(x) coef_grp[grep(x,rownames(coef_grp))])
+  
+  ind_basis = X[,grep(regex_ind,colnames(X))]
+  dep_basis = lapply(regex_dep, function(x) X[,grep(x,colnames(X))])
+  
+  result1 = list(ind_name = ind_name,
+                 dep_name = v_dep,
+                 ind_position = i,
+                 dep_position = match(v_dep, rownames(Y)),
+                 intercept = coef_grp[1],
+                 ind_coef = ind_coef,
+                 dep_coef = dep_coef,
+                 ind_basis = ind_basis,
+                 dep_basis = dep_basis,
+                 n_order = ncol(ind_basis),
+                 gr_cv = gr_cv)
+  
+  ###########adaptive
+  selected_coef = sapply(v_pos, function(x) coef_grp[which(v_group==x)+1] )
+  X2 = X[,c(sapply(v_pos, function(x) which(v_group==x)))]
+  v_group2 = c(sapply(1:length(v_selected), rep, bs))
+  
+  #penalty
+  w1 = 1/(apply(selected_coef,2,crossprod))^s
+  w1[match(ind_name, v_selected)] = 0
+  w2 = rep(1,ncol(X2))
+  w2[which(abs( selected_coef )>0)] = 1/(abs(coef_grp[abs(as.numeric(coef_grp))>0]))^s
+  
+  
+  
+  gr_cv2 = cv.sparsegl(x=X2, y=y, group=v_group2, 
+                       family = c("gaussian"),
+                       intercept = F,
+                       pf_group = w1, 
+                       pf_sparse = w2,
+                       nfolds=10)
+  coef_grp2 = coef(gr_cv2, s = gr_cv2$lambda.1se)
+  
+  selected2 = rownames(coef_grp2)[which(abs(as.numeric(coef_grp2))>0)]
+  v_selected2 = unique(sapply(strsplit(selected2,"__"),'[[',1))
+  v_dep2 = v_selected2
+  if ( ind_name %in% v_selected2) {
+    v_dep2 = v_selected2[-match(ind_name,v_selected2)]
+  }
+  v_pos2 = match(v_selected2,rownames(Y))
+  
+  
+  if ( is.null(v_dep2) ) {
+    warning('No dependent effect found')
+    regex_dep2 = NULL
+  } else{
+    regex_dep2 = sapply(v_dep2, paste0, "__leg")
+  }
+  
+  if ( ind_name %in% v_selected2 == F ) {
+    warning('No Independent effect include')
+  }
+  
+  
+  ind_coef2 = lapply(regex_ind, function(x) coef_grp2[grep(x,rownames(coef_grp2))])
+  dep_coef2 = lapply(regex_dep2, function(x) coef_grp2[grep(x,rownames(coef_grp2))])
+  
+  ind_basis2 = X2[,grep(regex_ind,colnames(X2))]
+  dep_basis2 = lapply(regex_dep2, function(x) X2[,grep(x,colnames(X2))])
+  
+  
+  ind_basis2 = X[,grep(regex_ind,colnames(X))]
+  dep_basis2 = lapply(regex_dep2, function(x) X2[,grep(x,colnames(X2))])
+  
+  
+  
+  result2 = list(ind_name = ind_name,
+                 dep_name = v_dep2,
+                 ind_position = i,
+                 dep_position = match(v_dep2, rownames(Y)),
+                 intercept = coef_grp2[1],
+                 ind_coef = ind_coef2,
+                 dep_coef = dep_coef2,
+                 ind_basis = ind_basis2,
+                 dep_basis = dep_basis2,
+                 n_order = ncol(ind_basis),
+                 gr_cv = gr_cv2)
+  
+  
+  result = list(SGL = result1,
+                ASGL = result2)
+  
+  return(result)
+}
+
+
+SparGrpLasso_Parallel <- function(X,Y,s=1,thread = 4){
+  require(parallel)
+  
+  core.number <- thread
+  cl <- makeCluster(getOption("cl.cores", core.number))
+  clusterEvalQ(cl, {require(sparsegl)})
+  clusterExport(cl, c("SparGrpLasso","X","Y","s"), envir=environment())
+  vsr_all = parLapply(1:nrow(Y),function(c) SparGrpLasso(X,Y,c,s=s), cl = cl)
+  stopCluster(cl)
+  
+  SGL = lapply(vsr_all, '[[', 'SGL')
+  ASGL = lapply(vsr_all, '[[', 'ASGL')
+  
+  names(SGL) = rownames(Y)
+  names(ASGL) = rownames(Y)
+  
+  SGL_edges = sum(unlist(lapply(SGL, function(c) length(c$dep_name))))
+  ASGL_edges = sum(unlist(lapply(ASGL, function(c) length(c$dep_name))))
+  
+  SGL_incomp =   0 %in% unlist(lapply(SGL, function(c) length(c$dep_name)))
+  ASGL_incomp =  0 %in% unlist(lapply(ASGL, function(c) length(c$dep_name)))
+  
+  
+  result = list(SGL = SGL,
+                SGL_edges = SGL_edges,
+                SGL_incomp = SGL_incomp,
+                ASGL = ASGL,
+                ASGL_edges = ASGL_edges,
+                ASGL_incomp = ASGL_incomp)
+}
+
+
+Qi <- function(times,basis,pars,x0=0){
+  #approximate Q_ind(X(t)) with times,need to map scaled(X) to time
+  fx <- splinefun(times, basis%*%pars, method = "fmm")
+  
+  mod <- function(t, State,parameters){                   
+    with(as.list(c(State,parameters)), {
+      dx <- fx(t)
+      list(c(dx))
+    })
+  }
+  
+  State <- c(x = x0) #only independent effect has intercept
+  
+  # solve numerically
+  out <- ode(y = State, times = times, 
+             func = mod, parms = NULL)
+  
+  return(out[,2])  
+}
+
+
+qdODE_lsi <- function(pars,vsr,times,fit_df){
+  #acquire independent and dependent effect
+  
+  pars2 = split(pars,ceiling(seq_along(pars) / vsr$n_order))
+  
+  ind_obs = as.numeric(fit_df[vsr$ind_position,])
+  Ind_effect = Qi(times = times,
+                  basis = vsr$ind_basis,
+                  pars = pars2[[1]],
+                  x0 = ind_obs[1])
+  
+  n = length(vsr$dep_position) #dependent effect  number
+  Dep_effect = sapply(1:n,function(xi) Qi(times = times,
+                                          basis = vsr$dep_basis[[xi]],
+                                          pars = pars2[[xi+1]]))
+  
+  all_effect = cbind(Ind_effect,Dep_effect)
+  y_fit = rowSums(all_effect)
+  
+  #avoid ind effect to be negative
+  res = crossprod(ind_obs-y_fit) + crossprod(Ind_effect[Ind_effect<0])# + sum(abs(pars))
+  res
+}
+
+
+qdODEi_optimize_LS <- function(vsr, times, fit_df){
+  #optimize it independently
+  
+  ind_obs = as.numeric(fit_df[vsr$ind_position,])
+  Ind_effect = Qi(times = times,
+                  basis = vsr$ind_basis,
+                  pars = vsr$ind_coef[[1]],
+                  x0 = ind_obs[1])
+  if ( any(Ind_effect<0) ) {
+    par_int = unlist(c(vsr$ind_coef,vsr$dep_coef))
+    qdODE_est = optim( par = par_int, 
+                       qdODE_lsi, 
+                       vsr = vsr,
+                       times = times,
+                       fit_df = fit_df,
+                       method = "L-BFGS",
+                       control = list(trace = T))
+    pars_hat = qdODE_est$par
+    pars2 = split(pars_hat,ceiling(seq_along(pars_hat) / vsr$n_order))
+    
+    vsr$ind_coef = list(pars2[[1]])
+    vsr$dep_coef = pars2[-1]
+    names(vsr$dep_coef) = vsr$dep_name
+  } 
+  
+  Ind_effect = Qi(times = times,
+                  basis = vsr$ind_basis,
+                  pars = vsr$ind_coef[[1]],
+                  x0 = ind_obs[1])
+  
+  n = length(vsr$dep_position) #dependent effect  number
+  Dep_effect = sapply(1:n,function(xi) Qi(times = times,
+                                          basis = vsr$dep_basis[[xi]],
+                                          pars = vsr$dep_coef[[xi]]))
+  
+  all_effect = cbind(Ind_effect,Dep_effect)
+  
+  res = crossprod(ind_obs - rowSums(all_effect))
+  logL = -dmvnorm(x = ind_obs, mean = rowSums(all_effect), log = T)
+  
+  plot_df = cbind(times,ind_obs, rowSums(all_effect), Ind_effect,Dep_effect)
+  colnames(plot_df)[1:3] = c('x', 'y', 'y.fit')
+  colnames(plot_df)[5:ncol(plot_df)] = vsr$dep_name
+  colnames(plot_df)[4] = vsr$ind_name
+  
+  result = list(vsr = vsr,
+                res = res,
+                logL = logL,
+                plot_df = data.frame(plot_df),
+                fit = plot_df)
+  return(result)
+}
+
+
+qdODE_Parallel <- function(vsr_result, times, fit_df,thread = 4){
+  require(parallel)
+  
+  core.number <- thread
+  cl <- makeCluster(getOption("cl.cores", core.number))
+  clusterEvalQ(cl, {require(deSolve)})
+  clusterEvalQ(cl, {require(mvtnorm)})
+  clusterExport(cl, c("vsr_result","qdODE_lsi","times","fit_df",
+                      "Qi","qdODEi_optimize_LS"), 
+                envir=environment())
+  qdODE_all = parLapply(1:nrow(fit_df),function(c) qdODEi_optimize_LS(vsr_result$ASGL[[c]], 
+                                                                      times, 
+                                                                      fit_df), 
+                        cl = cl)
+  stopCluster(cl)
+  
+  logL = sum(unlist(lapply(qdODE_all,'[[','logL')))
+  res = sum(unlist(lapply(qdODE_all,'[[','res')))
+  
+}
+
+qdODEplot_convert <- function(data){
+  n = ncol(data)
+  colnames(data)[4:n] = c(paste0("ind.",colnames(data)[4]),
+                          paste0("dep.",colnames(data)[5:n]))
+  
+  plot.df = melt(data, id.vars = c("x"))
+  
+  name = levels(plot.df[,2])
+  
+  ind.name = name[grep("ind", name)]
+  ind.name2 = strsplit(ind.name,split = "\\.")[[1]][2]
+  ind.df <- subset(plot.df, plot.df[,2] == ind.name)
+  ind.df$type = "ind"
+  ind.df$variable = ind.name2
+  
+  depname = levels(plot.df[,2])[grep("dep",name )]
+  dep.df <- subset(plot.df, plot.df[,2] %in% depname)
+  dep.df$type = "dep"
+  dep.df$variable = sapply(strsplit(as.character(dep.df$variable),"\\."),"[",2)
+  
+  
+  original.df = subset(plot.df, plot.df[,2] == "y")
+  original.df$type = "original"
+  original.df$variable = "original"
+  
+  fit.df = subset(plot.df, plot.df[,2] == "y.fit")
+  fit.df$type = "fit"
+  fit.df$variable = "fit"
+  
+  plot.df2 = rbind(ind.df, dep.df,fit.df)
+  
+  name.df = subset(plot.df2, plot.df[,1] == max(plot.df2[,1]))
+  name.df = name.df[-nrow(name.df),]
+  name.df[,2][name.df[,2] == "y.fit"] = ind.name2
+  
+  name.df = name.df[-which(name.df[,4] == "fit"),]
+  
+  name.df[,1] = name.df[,1]*1.002
+  return_obj = list(plot.df2 = plot.df2,
+                    name.df = name.df,
+                    ind.name2 = ind.name2)
+  return(return_obj)
+}
+
+#result = ode_result[[1]]$plot_df
+qdODE_plot_base <- function(result,label = 10, show.legend = TRUE){
+  require(ggrepel)
+  #result = result$plot_df2
+  result2 = qdODEplot_convert(result)
+  plot.df2 = result2$plot.df2
+  name.df = result2$name.df
+  ind.name2 = result2$ind.name2
+  name.df = name.df[-which(name.df$type=='ind'),]
+  
+  
+  p <- ggplot(plot.df2, mapping = aes_string(x = "x", y = "value")) +
+    geom_line(mapping = aes_string(group = "variable", colour = "type"), size = 1.1,
+              show.legend = show.legend) +
+    geom_text_repel(name.df, mapping = aes_string(label = "variable", colour = "type",
+                                                  x = "x", y = "value"), show.legend = FALSE,
+                    nudge_x = 0.03) +
+    geom_hline(yintercept = 0, size = 0.5,linetype = 'dashed') +
+    scale_color_manual(
+      name = "Effect Type",
+      labels = c("Dep Effect", "All Effect", "Ind Effect"),
+      values = c("#16C47F", "#4E71FF", "#FF8989")) +
+    xlab("Habitat Index") + ylab("Abundance") +
+    ggtitle(ind.name2) + theme_bw() +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          strip.background = element_blank(),
+          panel.border = element_rect(colour = "black", fill = NA))
+  theme(plot.title = element_text(hjust = 0.5))+ 
+    theme(axis.text.y = element_text(hjust = 0))
+  
+  return(p)
+}
+
+#label = 10
+#show.legend = TRUE
+qdODE_plot_all <- function(result,label = 10, show.legend = TRUE, nrow = NULL, ncol = NULL){
+  p = lapply(result, qdODE_plot_base, label = label, show.legend = show.legend)
+  #p = lapply(1:length(result$ode_result), function(c) qdODE_plot_base(result$ode_result[[c]], label = label))
+  p = lapply(p, "+", xlab(NULL))
+  p = lapply(p, "+", ylab(NULL))
+  
+  y_lab <- ggplot() + annotate(geom = "text", size=7,x = 1, y = 1,
+                               label = "Niche Index", angle = 90) +
+    coord_cartesian(clip = "off") + theme_void()
+  pp = (y_lab | wrap_plots(p, nrow = nrow, ncol = ncol)) +
+    plot_annotation(caption = "Habitat Index",
+                    theme = theme(plot.caption = element_text(size = 20,hjust=.5))) +
+    plot_layout(widths = c(.05, 1),guides = 'collect')
+  
+  return(pp)
+}
+
+
+
+network_conversion <- function(result){
+  n = ncol(result$fit)
+  
+  effect.mean = apply(result$fit,2,mean)[4:n]
+  effect.total = colSums(result$fit)[4:n]
+  
+  temp = matrix(NA,nrow = n-3, ncol=3)
+  colnames(temp) = c("From", "To", "Effect")
+  temp[,1] = colnames(result$fit)[4:n]
+  temp[,2] = colnames(result$fit)[4]
+  temp[,3] = effect.mean
+  if (nrow(temp)==2) {
+    temp = t(data.frame(temp[-1,]))
+  } else{
+    temp = data.frame(temp[-1,])
+  }
+  
+  temp2 = matrix(NA,nrow = n-3, ncol=3)
+  colnames(temp2) = c("From", "To", "Effect")
+  temp2[,1] = colnames(result$fit)[4:n]
+  temp2[,2] = colnames(result$fit)[4]
+  temp2[,3] = effect.total
+  if (nrow(temp2)==2) {
+    temp2 = t(data.frame(temp2[-1,]))
+  } else{
+    temp2 = data.frame(temp2[-1,])
+  }
+  output <- list(ind.name = colnames(result$fit)[4],
+                 dep.name = colnames(result$fit)[5:n],
+                 #ODE.par = result$ODE.value,
+                 #ind.par = result$LOP_par[,3],
+                 #dep.par = result$LOP_par[,4:(n-1)],
+                 effect.mean = effect.mean,
+                 effect.total = effect.total,
+                 effect.all = result$fit,
+                 edge = temp,
+                 edge.total = temp2,
+                 ind.effect = effect.mean[1])
+  return(output)
+}
+
+
+remove_non_significant <- function(d, thred = 0.01){
+  if (length(which(abs(colMeans(d))<=thred)) == 0 ){
+    d2 = d
+  } else{
+    d2 = d[,-which(abs(colMeans(d))<=thred)]
+    
+  }
+  
+  if(ncol(d2)==4){
+    n = which.max(abs(colMeans(d[,-(1:4)])))+4
+    d2 = d[,c(1:4,n)]
+  }
+  
+  return(list(fit = d2,
+              plot_df = d2))
+}
+
+
+
+batch_LOP_M = lapply(1:nrow(new_df), function(xi) get_LOP_M(x = new_df[xi,], 
+                                                            n_order = 6, 
+                                                            name = all_names[xi]))
+batch_LOP_M = Reduce(cbind,batch_LOP_M)
+
+
+
+vsr_result = try(SparGrpLasso_Parallel(batch_LOP_M,d_df,s=0.01))
+
+#SparGrpLasso(X = batch_LOP_M, Y  = d_df, i = 2, s= 0.01)
+
+
+while ("try-error" %in% class(vsr_result) ) {
+  vsr_result = try(SparGrpLasso_Parallel(batch_LOP_M,d_df))
+}
+
+print('Finish Variable Selection')
+
+#ode_result = qdODE_Parallel(vsr_result$ASGL,new_x,new_df)
+if (vsr_result$ASGL_incomp == F) {
+  print("No missing")
+}
+
+
+ode_result = lapply(1:nrow(pars),function(c) qdODEi_optimize_LS(vsr_result$SGL[[c]],
+                                                                new_x,
+                                                                new_df))
+
+
+ode_result = lapply(ode_result, function(c) 
+  remove_non_significant(c$plot_df,thred = my_thred))
+
+
+
+
+
+#ode_result2 = lapply(select, function(c) 
+#  remove_non_significant(c$plot_df,thred = 1e-4))
+#tmp = (1:length(ode_result))[-select]
+#ode_result1 = lapply(tmp, function(c) 
+#  remove_non_significant(c$plot_df,thred = 1e-4))
+
+#ode_result = append(ode_result1,ode_result2)
+
+
+
+network_result = lapply(ode_result, network_conversion)
+
+
+
+#result = network_result;maxeffect = NULL;title = NULL
+network_plot <- function(result, title = NULL, maxeffect = NULL){
+  source("igraphplot2.R")
+  environment(plot.igraph2) <- asNamespace('igraph')
+  environment(igraph.Arrows2) <- asNamespace('igraph')
+  extra <- sapply(result,"[[", "ind.effect")
+  
+  
+  after <- data.frame(do.call(rbind, lapply(result, "[[", "edge")))
+  
+  after$Effect = as.numeric(after$Effect)
+  rownames(after) = NULL
+  
+  
+  after$edge.colour = NA
+  for (i in 1:nrow(after)) {
+    if(after$Effect[i]>=0){
+      after$edge.colour[i] = "#FE433C"
+    } else{
+      after$edge.colour[i] = "#0095EF"
+    }
+  }
+  
+  #nodes
+  nodes <- data.frame(unique(after[,2]),unique(after[,2]),extra)
+  colnames(nodes) <- c("id","name","ind_effect")
+  nodes$influence[match(aggregate(Effect ~ To, data = after, sum)[,1],nodes$id)] <- 
+    aggregate(Effect ~ To, data = after, sum)[,2]
+  
+  
+  nodes$node.colour = NA
+  for (i in 1:nrow(nodes)) {
+    if(nodes$influence[i]>=0){
+      nodes$node.colour[i] = "#FFC4C4"
+    } else{
+      nodes$node.colour[i] = "#89CFFD"
+    }
+  }
+  
+  #normalization
+  if (is.null(maxeffect)) {
+    after[,3] <- normalization(abs(after[,3]))
+    nodes[,3:4] <- normalization(abs(nodes[,3:4]))
+  } else{
+    after[,3] <- (abs(after[,3]))/maxeffect*1.5+0.1
+    nodes[,3:4] <- (abs(nodes[,3:4]))/maxeffect*1.5+0.1
+  }
+  
+  net <- graph_from_data_frame( d=after,vertices = nodes,directed = T )
+  
+  #layout
+  set.seed(4)
+  
+  #l <- layout_randomly(net)
+  l = layout_as_star(net)
+  plot.igraph(net,
+              rescale=T,
+              #xlim=c(0,0.65),
+              #ylim=c(-0.3,0),
+              vertex.label=V(net)$name,
+              #vertex.label=NA,
+              #vertex.shape = "none",
+              vertex.label.color="black",
+              vertex.shape="circle",
+              vertex.label.cex=V(net)$ind_effect*1+1,
+              vertex.label.cex=1.5,
+              vertex.size=V(net)$ind_effect*20+20,
+              vertex.size=5,
+              edge.arrow.size=E(net)$Effect*0.55,
+              edge.curved=0.05,
+              edge.color=E(net)$edge.colour,
+              edge.frame.color=E(net)$edge.colour,
+              edge.width=E(net)$Effect*2,
+              vertex.color=V(net)$node.colour,
+              layout=l,
+              main=title#,
+              #margin=c(-.05,-.05,-.05,-.05)
+  )
+  return(net)
+}
+
+normalization <- function(x, z = 0.2){(x-min(x))/(max(x)-min(x))+z}
+
+net = network_plot(network_result)
+
+get_eigv <- function(net, crit = 0.9){
+  a = eigen_centrality(net,directed = FALSE,scale = TRUE,
+                       #weights = V(net)$ind_effect,
+                       options = arpack_defaults)
+  d = data.frame(names = names(a$vector), values = a$vector)
+  p1 = ggplot(d) + geom_col(mapping=aes(reorder(names,  values, decreasing = T),  values))+ theme_bw()+
+    ylab("Eigen Centrity") + xlab("Nodes") +
+    scale_y_continuous(expand = c(0,NA))+
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 12))
+  p1
+}
+
+get_degree <- function(net){
+  df = data.frame(cbind(degree(net, mode = c("in")), degree(net, mode = c("out"))))
+  df = cbind(rownames(df),df)
+  colnames(df) = c("cluster","in1","out1")
+  df[,3] <- -df[,3]
+  df[is.na(df)] <- 0
+  
+  
+  g1 <- ggplot() +
+    geom_col(df, mapping=aes(reorder(cluster, out1), out1),
+             position = position_dodge(), fill = "#65C18C",width = 1, size = 0.3, alpha = 0.67, show.legend = T) +
+    geom_col(df, mapping=aes(cluster, in1),
+             position = position_dodge(), fill = "#FF7BA9",width = 1, size = 0.3, alpha = 0.67, show.legend = T) +
+    theme(panel.grid = element_blank(), 
+          panel.background = element_rect(color = 'black', fill = 'transparent')) +
+    xlab(NULL) + ylab('Degree')+ 
+    scale_color_manual(name=NULL,
+                       breaks=c('Incoming', 'Outgoing'),
+                       values = c("Incoming" = "#65C18C", "Outgoing" = "#FF7BA9"))
+  
+  
+  
+  y_max = max(abs(layer_scales(g1)$y$range$range))
+  
+  g1 = g1+
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 12)) +
+    theme(legend.position = c(0.9, 0.9)) + 
+    scale_y_continuous(limits = c(-y_max,y_max)) + 
+    geom_hline(yintercept = 0, size = 0.5)
+  
+  return(g1)
+}
+
+
+get_net_summary <- function(net,name){
+  p1 = get_eigv(net)
+  p2 = get_degree(net)
+  pp = p1/p2
+  ggsave(pp, file = paste0(name,'_degree_eigv.pdf'),width = 10,height = 8)
+  net_property = data.frame(get_net_property(net))
+  write.csv(net_property,file = paste0(name,'.csv'))
+  
+  return(list(p = pp, net_property = net_property))
+}
+
+
+get_net_property <- function(net){
+  
+  result = list(net.edge.density = edge_density(net),
+                net.mean.distance = mean_distance(net),
+                net.diameter = diameter(net))
+  result
+}
+
+#et_net_summary(net,batch)
+network_plot(network_result)
+
+
+
+result = network_result
+
+
+
+result = lapply(ode_result, network_conversion)
+network_plot2 <- function(result, name_matrix, reference,
+                          title = NULL, maxeffect = NULL){
+  source("igraphplot2.R")
+  environment(plot.igraph2) <- asNamespace('igraph')
+  environment(igraph.Arrows2) <- asNamespace('igraph')
+  extra <- sapply(result,"[[", "ind.effect")
+  
+  normalization <- function(x, z = 0.2){(x-min(x))/(max(x)-min(x))+z}
+  
+  after <- data.frame(do.call(rbind, lapply(result, "[[", "edge")))
+  
+  after$Effect = as.numeric(after$Effect)
+  rownames(after) = NULL
+  
+  #rename
+  after$From = name_matrix[,1][match(after$From,name_matrix[,2])]
+  after$To   = name_matrix[,1][match(after$To,name_matrix[,2])]
+  
+  
+  after$edge.colour = NA
+  for (i in 1:nrow(after)) {
+    if(after$Effect[i]>=0){
+      after$edge.colour[i] = "#FE433C"
+    } else{
+      after$edge.colour[i] = "#0095EF"
+    }
+  }
+  
+  #nodes
+  nodes <- data.frame(unique(after[,2]),unique(after[,2]),extra)
+  colnames(nodes) <- c("id","name","ind_effect")
+  nodes$influence[match(aggregate(Effect ~ To, data = after, sum)[,1],nodes$id)] <- 
+    aggregate(Effect ~ To, data = after, sum)[,2]
+  
+  
+  nodes$node.colour = NA
+  for (i in 1:nrow(nodes)) {
+    if(nodes$influence[i]>=0){
+      nodes$node.colour[i] = "#FFC4C4"
+    } else{
+      nodes$node.colour[i] = "#89CFFD"
+    }
+  }
+  
+  #normalization
+  if (is.null(maxeffect)) {
+    after[,3] <- normalization(abs(after[,3]))
+    nodes[,3:4] <- normalization(abs(nodes[,3:4]))
+  } else{
+    after[,3] <- (abs(after[,3]))/maxeffect*1.5+0.1
+    nodes[,3:4] <- (abs(nodes[,3:4]))/maxeffect*1.5+0.1
+  }
+  
+  
+  v1 = reference$superfamily[match(after$From,reference$names)]
+  v2 = reference$superfamily[match(after$To,reference$names)]
+  v = data.frame(v1,v2)
+  
+  check <- function(v){
+    if( v[1]==v[2]){
+      if(v[1]=="Bacteria"){
+        r = 'Bacteria*Bacteria Interaction'
+      } else{
+        r = 'Fungi*Fungi Interaction'
+      }
+    }  
+    else{
+      r = "Bacteria*Fungi Interaction"
+    }
+    
+    r
+  }
+  
+  
+  
+  net <- graph_from_data_frame( d=after,vertices = nodes,directed = T )
+  
+  ## Add edges with high weight between all nodes in the same group
+  
+  superfamily = reference$superfamily
+  #set.seed(34)
+  
+  if ( length(table(superfamily)) == 1 ) {
+    L0 = layout_with_fr(net)
+    plot.igraph2(net,
+                 rescale=T,
+                 mark.border=NA, 
+                 #mark.groups=grp,
+                 #xlim=c(0,0.65),
+                 #ylim=c(-0.3,0),
+                 vertex.label=V(net)$name,
+                 #vertex.label=NA,
+                 #vertex.shape = "none",
+                 vertex.label.color="black",
+                 vertex.shape="circle",
+                 vertex.label.cex=V(net)$ind_effect*1,
+                 vertex.size=V(net)$ind_effect*10+5,
+                 vertex.size=5,
+                 edge.arrow.size=E(net)$Effect*0.55,
+                 edge.curved=0.05,
+                 edge.color=E(net)$edge.colour,
+                 edge.frame.color=E(net)$edge.colour,
+                 edge.width=E(net)$Effect*2,
+                 vertex.color=V(net)$node.colour,
+                 layout=L0,
+                 main=title#,
+                 #margin=c(-.05,-.05,-.05,-.05)
+    )
+    
+  } else {
+    
+    V(net)$Group1 = superfamily
+    
+    
+    number = length(table(superfamily))
+    grp =  lapply(1:number, function(xi) which(superfamily == unique(superfamily)[xi]))
+    
+    
+    G = net
+    G_Grouped = net
+    E(G_Grouped)$weight = 1
+    
+    ## Add edges with high weight between all nodes in the same group
+    for(i in unique(V(G)$Group1)) {
+      if(length(i)==1){
+        next
+      }
+      GroupV = which(V(G)$Group1 == i)
+      G_Grouped = add_edges(G_Grouped, combn(GroupV, 2), attr=list(weight = 3))
+    } 
+    
+    ## Now create a layout based on G_Grouped
+    
+    L0 = layout_with_fr(G_Grouped)
+    L0 = layout_nicely(G_Grouped)
+    #L0 = layout_randomly(G_Grouped)
+    #l = layout_nicely(net)
+    
+    plot.igraph2(G_Grouped,
+                 rescale=T,
+                 mark.border=NA, 
+                 mark.groups=grp,
+                 #xlim=c(0,0.65),
+                 #ylim=c(-0.3,0),
+                 vertex.label=V(G_Grouped)$name,
+                 #vertex.label=NA,
+                 #vertex.shape = "none",
+                 vertex.label.color="black",
+                 vertex.shape="circle",
+                 vertex.label.cex=V(G_Grouped)$ind_effect*1,
+                 vertex.size=V(G_Grouped)$ind_effect*10+5,
+                 vertex.size=5,
+                 edge.arrow.size=E(G_Grouped)$Effect*0.55,
+                 edge.curved=0.05,
+                 edge.color=E(G_Grouped)$edge.colour,
+                 edge.frame.color=E(G_Grouped)$edge.colour,
+                 edge.width=E(G_Grouped)$Effect*2,
+                 vertex.color=V(G_Grouped)$node.colour,
+                 layout=L0,
+                 main=title#,
+                 #margin=c(-.05,-.05,-.05,-.05)
+    )
+  }
+  
+  interaction  = data.frame(table(apply(v, 1, check)))
+  #return( net = net)
+  ref_interaction = data.frame(Var1 = c('Bacteria*Bacteria Interaction',
+                                        "Bacteria*Fungi Interaction",
+                                        'Fungi*Fungi Interaction'),
+                               Freq = c(0,0,0))
+  
+  ref_interaction$Freq[na.omit(match(ref_interaction$Var1,interaction$Var1))] = interaction$Freq
+  
+  
+  return(list(net = net,
+              interaction = ref_interaction))
+}
+
+#qdODE_plot_base(ode_result[[11]]$plot_df)
+
+
+qdODE_plot_base01 <- function(result,j,label = 10, limits=c(0,1), show.legend = TRUE){
+  require(ggrepel)
+  
+  
+  #j=7
+  #no = j-min(select)+1
+  
+  tmp = as.numeric(fit$trans_data[j,])
+  dff = data.frame(x = fit$times_log,
+                   y = tmp)
+  
+  
+  
+  #result = result$plot_df2
+  result2 = qdODEplot_convert(result)
+  plot.df2 = result2$plot.df2
+  name.df = result2$name.df
+  ind.name2 = result2$ind.name2
+  name.df = name.df[-which(name.df$type=='ind'),]
+  
+  
+  p <- ggplot(plot.df2, mapping = aes_string(x = "x", y = "value")) +
+    geom_line(mapping = aes_string(group = "variable", colour = "type"), size = 1.1,
+              show.legend = show.legend) +
+    geom_point(dff,mapping = aes(x,y),color = "#4E71FF",shape = 1)+
+    geom_text_repel(name.df, mapping = aes_string(label = "variable", colour = "type",
+                                                  x = "x", y = "value"), show.legend = FALSE,
+                    nudge_x = 0.01) +
+    geom_hline(yintercept = 0, size = 0.5,linetype = 'dashed') +
+    scale_color_manual(
+      name = "Effect Type",
+      labels = c("Dep Effect", "All Effect", "Ind Effect"),
+      values = c("#16C47F", "#4E71FF", "#FF8989")) +
+    xlab("Habitat Index") + ylab("Abundance") +
+    ggtitle(ind.name2) + theme_bw() + scale_y_continuous(limits = limits)+
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          strip.background = element_blank(),
+          panel.border = element_rect(colour = "black", fill = NA))
+  theme(plot.title = element_text(hjust = 0.5))+ 
+    theme(axis.text.y = element_text(hjust = 0))
+  
+  return(p)
+}
+
+limits = list(c(-0.1,0.3),
+              c(-0.1,0.4),
+              c(-0.03,2.5),
+              c(-0.03,2.5),
+              c(-0.01,0.02),
+              c(-0.02,0.05),
+              c(-0.05,0.1))
+#qdODE_plot_all(ode_result)
+#p_list1 = lapply((1:nrow(pars))[-select],function(xi) 
+#  qdODE_plot_base(ode_result[[xi]]$plot_df))
+
+p_list2 = lapply(select,function(xi) 
+  qdODE_plot_base01(ode_result[[xi]]$plot_df,xi,limits=limits[[(xi-min(select)+1)]]))
+
+pp2 = wrap_plots(p_list2,nrow = 7)
+
+#select[1]-min(select)+1
+
+#pp2 = wrap_plots(p_list2,nrow = 7)
+#ggsave(pp2,file = paste0('fid',batch,'.pdf'),width = 5, height = 18)
+
+#ggsave(pp2,file = paste0('all.pdf'),width = 20, height = 20)
+
+library(igraph)
+
+source("igraphplot2.R")
+environment(plot.igraph2) <- asNamespace('igraph')
+environment(igraph.Arrows2) <- asNamespace('igraph')
+
+
+result = network_result;maxeffect = NULL;title = NULL;
+extra <- sapply(result,"[[", "ind.effect")
+
+
+after <- data.frame(do.call(rbind, lapply(result, "[[", "edge")))
+
+after$Effect = as.numeric(after$Effect)
+rownames(after) = NULL
+
+normalization <- function(x, z = 0.2){(x-min(x))/(max(x)-min(x))+z}
+
+after$edge.colour = NA
+for (i in 1:nrow(after)) {
+  if(after$Effect[i]>=0){
+    after$edge.colour[i] = "#FE433C"
+  } else{
+    after$edge.colour[i] = "#0000ff"
+  }
+}
+#"#0000ff""
+#nodes
+nodes <- data.frame(unique(after[,2]),unique(after[,2]),extra)
+colnames(nodes) <- c("id","name","ind_effect")
+nodes$influence[match(aggregate(Effect ~ To, data = after, sum)[,1],nodes$id)] <- 
+  aggregate(Effect ~ To, data = after, sum)[,2]
+
+
+nodes$node.colour = NA
+for (i in 1:nrow(nodes)) {
+  if(nodes$influence[i]>=0){
+    nodes$node.colour[i] = "#FFC4C4"
+  } else{
+    nodes$node.colour[i] = "#00BEFF"
+  }
+}
+nodes$node.colour = '#FFFBDE'
+#normalization
+if (is.null(maxeffect)) {
+  after[,3] <- normalization(abs(after[,3]))
+  nodes[,3:4] <- normalization(abs(nodes[,3:4]))
+} else{
+  after[,3] <- (abs(after[,3]))/maxeffect*1.5+0.1
+  nodes[,3:4] <- (abs(nodes[,3:4]))/maxeffect*1.5+0.1
+}
+
+net <- graph_from_data_frame( d=after,vertices = nodes,directed = T )
+
+
+
+
+nodes$group <- ifelse(grepl(strsplit(batch,split = '')[[1]][1],
+                            nodes$id), "A", "B")  # 自行修改
+
+
+
+generate_full_ellipse <- function(n, a = 1, b = 0.5, center_x = 0, center_y = 0, offset_angle = 0) {
+  theta <- seq(0, 2 * pi, length.out = n + 1)[-1]  # 去掉末尾重复点
+  x <- center_x + a * cos(theta + offset_angle)
+  y <- center_y + b * sin(theta + offset_angle)
+  cbind(x, y)
+}
+
+# 按组拆分节点
+upper_nodes <- nodes[nodes$group == "A", ]
+lower_nodes <- nodes[nodes$group == "B", ]
+
+# 生成布局
+layout_upper <- generate_full_ellipse(n = nrow(upper_nodes), a = 1, b = 0.5, center_y = 1.5)
+layout_lower <- generate_full_ellipse(n = nrow(lower_nodes), a = 1, b = 0.5, center_y = -1.5)
+layout_upper[,2] = layout_upper[,2]-0.5
+layout_lower[,2] = layout_lower[,2]+0.5
+
+layout_upper[,1] = layout_upper[,1]*0.9
+layout_lower[,1] = layout_lower[,1]*0.9
+
+# 组合成完整 layout（顺序必须与 nodes 对应）
+layout_matrix <- matrix(NA, nrow = nrow(nodes), ncol = 2)
+layout_matrix[match(upper_nodes$id, nodes$id), ] <- layout_upper
+layout_matrix[match(lower_nodes$id, nodes$id), ] <- layout_lower
+
+
+
+V(net)$label.font = 3
+
+
+
+pdf(paste0('Fig_module_',batch,'.pdf'),width= 6,height = 10)
+plot.igraph2(net,
+            rescale = F,
+            vertex.label = V(net)$name,
+            vertex.label.color = "black",
+            vertex.frame.color = NA,
+            vertex.shape = "circle",
+            vertex.label.cex = V(net)$ind_effect*2.3+1,
+            vertex.size = V(net)$ind_effect * 25 + 20,
+            edge.arrow.size = E(net)$Effect * 0.85+0.5,
+            edge.curved = 0.15,
+            edge.color = E(net)$edge.colour,
+            edge.frame.color = E(net)$edge.colour,
+            edge.width = E(net)$Effect * 2.5+0.5,
+            vertex.color = V(net)$node.colour,
+            layout = layout_matrix,
+            main = title
+)
+
+dev.off()
