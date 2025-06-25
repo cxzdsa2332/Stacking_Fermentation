@@ -1,0 +1,217 @@
+load('result_fit.Rdata')
+
+
+
+names(result_fit) = c('XD','ZD',"YD","ED")
+name11 = 'Saccharomycetales'
+
+
+jjj=2
+#jjj=3
+
+qdODE_plot_base <- function(result,jjj,label = 10, show.legend = F, 
+                            background = '#fef8f8'){
+  require(ggrepel)
+  result = result$plot_df
+  result2 = qdODEplot_convert(result)
+  plot.df2 = result2$plot.df2
+  name.df = result2$name.df
+  ind.name2 = result2$ind.name2
+  name.df = name.df[-which(name.df$type=='ind'),]
+  
+  batch = c('XD','ZD',"YD","ED")[jjj]
+  result_fit = result_fit[[batch]]
+  module = df_info[match(name11,df_info$id),match(batch,colnames(df_info))]
+
+  
+  tmp = as.numeric(result_fit$trans_data[match(name11,rownames(result_fit$trans_data)),])
+  obs = data.frame(x=result_fit$times_log,
+                   y = tmp)
+  
+  
+  
+  p <- ggplot(plot.df2, mapping = aes_string(x = "x", y = "value")) +
+    geom_line(mapping = aes_string(group = "variable", colour = "type"), size = 1.1,
+              show.legend = show.legend) +
+    geom_text_repel(name.df, mapping = aes_string(label = "variable", colour = "type",
+                                                   x = "x", y = "value"), size=5,
+                    show.legend = FALSE) +
+    geom_hline(yintercept = 0, size = 0.5,linetype = 'dashed') +
+    geom_point(obs, mapping = aes(x=x,y=y),color = "#4E71FF",shape = 1)+
+    scale_color_manual(
+      name = "Effect Type",
+      labels = c("Dep Effect", "All Effect", "Ind Effect"),
+      values = c("#16C47F", "#4E71FF", "#FF8989")) +
+    xlab("Habitat Index") + ylab("Abundance") +    
+    ggtitle(ind.name2) + theme_bw() + 
+    theme(axis.text = element_text(size = 11),  
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          strip.background = element_blank()) +
+    scale_y_continuous(limits = c(-2,4.5))+
+    theme(plot.title = element_text(hjust = 0.5))+ 
+    theme(axis.text.y = element_text(hjust = 0))
+  
+  return(p)
+}
+
+
+
+plot_ind <- function(name11,jjj){
+  batch = c('XD','ZD',"YD","ED")[jjj]
+  result_fit = result_fit[[batch]]
+  #module = 1;name = paste0(batch,'_M',module)
+  n_order = 6 #s=0.01
+  
+  
+  #name11 in what module?
+  module = df_info[match(name11,df_info$id),match(batch,colnames(df_info))]
+  
+  pars = result_fit$pars[df_info$id[which(df_info[[batch]]==module)],]
+  x =result_fit$times_log
+  new_x = seq(min(x), max(x), length = 50)
+  new_df = power_equation(new_x,pars)
+  d_df = d_power_equation(new_x,pars)
+  original_name = rownames(pars)
+  new_name = df_info$Rename[match(rownames(pars),df_info$id)]
+  
+  name_matrix = cbind(original_name,new_name)
+  
+  
+  
+  if (length(which(rowSums(pars)==0)) >0) {
+    new_df = new_df[-which(rowSums(pars)==0),]
+    d_df = d_df[-which(rowSums(pars)==0),]
+    new_name = new_name[-which(rowSums(pars)==0)]
+    name_matrix = name_matrix[-which(rowSums(pars)==0),]
+    pars = pars[-which(rowSums(pars)==0),]
+    
+  }
+  
+  
+  rownames(pars) = new_name
+  rownames(d_df) = new_name
+  
+  reference = data.frame(names = rownames(new_df) )
+  
+  batch_LOP_M = lapply(1:nrow(new_df), function(xi) get_LOP_M(x = new_df[xi,], 
+                                                              n_order = 6, 
+                                                              name = new_name[xi]))
+  batch_LOP_M = Reduce(cbind,batch_LOP_M)
+  
+  
+  
+  vsr_result = try(SparGrpLasso_Parallel(batch_LOP_M,d_df,s=0.01))
+  
+  #SparGrpLasso(X = batch_LOP_M, Y  = d_df, i = 2, s= 0.01)
+  
+  iter=1
+  while ("try-error" %in% class(vsr_result) ) {
+    vsr_result = try(SparGrpLasso_Parallel(batch_LOP_M,d_df))
+    iter = iter +1
+    if (iter >5) {
+      break
+    }
+  }
+  
+  print('Finish Variable Selection')
+  
+  #ode_result = qdODE_Parallel(vsr_result$ASGL,new_x,new_df)
+  if (vsr_result$ASGL_incomp == F) {
+    print("No missing")
+  }
+  
+  
+  ode_result = lapply(1:nrow(pars),function(c) qdODEi_optimize_LS(vsr_result$SGL[[c]],
+                                                                  new_x,
+                                                                  new_df))
+  
+  
+  ode_result = lapply(ode_result, function(c) 
+    remove_non_significant(c$plot_df,thred = 1e-3))
+  
+  
+  p1 = qdODE_plot_base( ode_result[[match(name11,reference$names)]],jjj)
+  #p1 = qdODE_plot_base( ode_result[[16]])
+  p1
+  
+  
+}
+
+
+p1 = try(plot_ind(name11,1))
+if("try-error" %in% class(p1)){
+  p1 = ggplot(mtcars, aes(wt, mpg))
+}
+p2 = try(plot_ind(name11,2))
+
+if("try-error" %in% class(p2)){
+  p2 = ggplot(mtcars, aes(wt, mpg))
+}
+
+p3 = try(plot_ind(name11,3))
+if("try-error" %in% class(p3)){
+  p3 = ggplot(mtcars, aes(wt, mpg))
+}
+p4 = try(plot_ind(name11,4))
+if("try-error" %in% class(p4)){
+  p4 = ggplot(mtcars, aes(wt, mpg))
+}
+
+
+pp=list(p1,p2,p3,p4)
+pp = wrap_plots(pp, ncol = 4)
+
+
+ggsave(pp, file = 'F10.pdf',width = 15,height = 2.7)
+
+
+load('result_fit.Rdata')
+name11 = 'Zygosaccharomyces'
+names(result_fit) = c('XD','ZD',"YD","ED")
+jjj=1
+qdODE_plot_base00 <- function(jjj,label = 10, show.legend = F, 
+                            background = '#fef8f8'){
+  
+  
+  batch = c('XD','ZD',"YD","ED")[jjj]
+  result_fit = result_fit[[batch]]
+  module = df_info[match(name11,df_info$id),match(batch,colnames(df_info))]
+  
+  
+  tmp = as.numeric(result_fit$trans_data[match(name11,rownames(result_fit$trans_data)),])
+  obs = data.frame(x=result_fit$times_log,
+                   y = tmp)
+  
+  
+  
+  p <- ggplot()+geom_point(obs, mapping = aes(x=x,y=y),color = "#4E71FF",shape = 1)+
+    geom_hline(yintercept = 0, size = 0.5,linetype = 'dashed') +
+    xlab("Habitat Index") + ylab("Abundance")  + theme_bw() + 
+    theme(axis.text = element_text(size = 11),  
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          strip.background = element_blank()) +
+    scale_y_continuous(limits = c(-2,6))+
+    theme(plot.title = element_text(hjust = 0.5))+ 
+    theme(axis.text.y = element_text(hjust = 0))
+  
+  return(p)
+}
+
+p1 = try(qdODE_plot_base00(1))
+
+p2 = try(qdODE_plot_base00(2))
+
+
+p3 = try(qdODE_plot_base00(3))
+
+p4 = try(qdODE_plot_base00(4))
+
+
+
+pp=list(p1,p2,p3,p4)
+pp = wrap_plots(pp, ncol = 4)
+
+
+ggsave(pp, file = 'F10_0.pdf',width = 15,height = 2.7)
