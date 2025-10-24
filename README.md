@@ -2,7 +2,9 @@
 
 R Code for Analyzing Microbial Interaction Networks in Sauce-Aroma Baijiu
 
+
 Original data accession from The Genome Sequence Archive (GSA): CRA013858 and CRA013856
+
 
 16s_otu.csv, ITS_otu.csv, 理化因子.xlsx contain raw OTU abundance data and phenotypic data.
 
